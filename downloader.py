@@ -5,14 +5,16 @@ from __future__ import annotations
 import os
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Literal
 
 import requests
 
 from config import (
     DOWNLOAD_CHUNK_SIZE,
+    MAX_DOWNLOAD_WORKERS,
     MAX_RETRIES,
     OVERWRITE,
     REQUEST_TIMEOUT,
@@ -128,24 +130,65 @@ def download_reception_files(
     reception: Reception,
     output_dir: str | Path,
     overwrite: bool = OVERWRITE,
-    on_download: Callable[[str, str], None] | None = None,
-    on_result: Callable[[str, DownloadResult], None] | None = None,
 ) -> dict[str, DownloadResult]:
-    """Download every available file for a reception into its UTC folder."""
-    if reception.timestamp is None:
-        return {}
+    """Download the available files for one reception using worker threads."""
+    completed = download_receptions_files([reception], output_dir, overwrite)
+    return {file_type: result for _, file_type, result in completed}
 
-    reception_dir = build_reception_directory(reception.timestamp, output_dir)
-    results: dict[str, DownloadResult] = {}
-    for file_type, filename in DATA_TYPE_FILENAMES.items():
-        url = reception.links.get(file_type)
-        if url:
-            if on_download:
-                on_download(file_type, filename)
-            result = download_file(
-                url, reception_dir / filename, overwrite=overwrite
+
+def download_receptions_files(
+    receptions: list[Reception],
+    output_dir: str | Path,
+    overwrite: bool = OVERWRITE,
+    max_workers: int = MAX_DOWNLOAD_WORKERS,
+) -> list[tuple[Reception, str, DownloadResult]]:
+    """Download files across all receptions with a shared bounded worker pool.
+
+    Results are returned in completion order so the caller can report progress
+    as each independent download finishes.
+    """
+    jobs: list[tuple[Reception, str, str, Path]] = []
+    for reception in receptions:
+        if reception.timestamp is None:
+            continue
+        reception_dir = build_reception_directory(reception.timestamp, output_dir)
+        for file_type, filename in DATA_TYPE_FILENAMES.items():
+            url = reception.links.get(file_type)
+            if url:
+                jobs.append((reception, file_type, url, reception_dir / filename))
+
+    if not jobs:
+        return []
+
+    results: list[tuple[Reception, str, DownloadResult]] = []
+    worker_count = max(1, max_workers)
+    executor = ThreadPoolExecutor(
+        max_workers=worker_count, thread_name_prefix="satellite-download"
+    )
+    future_to_job = {}
+    try:
+        for reception, file_type, url, destination in jobs:
+            future = executor.submit(download_file, url, destination, overwrite)
+            future_to_job[future] = (
+                reception,
+                file_type,
+                destination,
             )
-            results[file_type] = result
-            if on_result:
-                on_result(file_type, result)
+        for future in as_completed(future_to_job):
+            reception, file_type, destination = future_to_job[future]
+            try:
+                result = future.result()
+            except Exception as exc:
+                result = DownloadResult("failed", destination, error=str(exc))
+            results.append((reception, file_type, result))
+    except KeyboardInterrupt:
+        for future in future_to_job:
+            future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    except BaseException:
+        executor.shutdown(wait=True)
+        raise
+    else:
+        executor.shutdown(wait=True)
     return results

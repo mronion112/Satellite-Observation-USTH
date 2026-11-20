@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from config import HTML_FILENAME, OUTPUT_DIR, OVERWRITE, TARGET_URL
-from downloader import DownloadResult, download_reception_files
+from config import HTML_FILENAME, MAX_DOWNLOAD_WORKERS, OUTPUT_DIR, OVERWRITE, TARGET_URL
+from downloader import DownloadResult, download_receptions_files
 from scraper import (
     Reception,
     build_reception_directory,
@@ -24,21 +24,29 @@ def _format_size(size: int) -> str:
     return f"{size} B"
 
 
-def _print_result(file_type: str, result: DownloadResult) -> tuple[int, int, int]:
+def _print_result(
+    reception: Reception,
+    file_type: str,
+    result: DownloadResult,
+    completed: int,
+    total: int,
+) -> tuple[int, int, int]:
     filename = result.destination.name
+    label = f"{reception.timestamp_text or 'reception'} {file_type} -> {filename}"
     if result.status == "downloaded":
-        print(f"[SUCCESS] {filename} ({_format_size(result.bytes_downloaded)})")
+        print(
+            f"[SUCCESS] [{completed}/{total}] {label} "
+            f"({_format_size(result.bytes_downloaded)})"
+        )
         return 1, 0, 0
     if result.status == "skipped":
-        print(f"[SKIPPED] {filename}: {result.error}")
+        print(f"[SKIPPED] [{completed}/{total}] {label}: {result.error}")
         return 0, 0, 1
-    print(f"[ERROR] {file_type} -> {filename}: {result.error}")
+    print(f"[ERROR] [{completed}/{total}] {label}: {result.error}")
     return 0, 1, 0
 
 
-def _report_reception(
-    reception: Reception, output_dir: str, overwrite: bool
-) -> tuple[int, int, int]:
+def _report_reception(reception: Reception, output_dir: str) -> None:
     print(f"\n[RECEPTION] {reception.timestamp_text or 'invalid UTC timestamp'}")
     for error in reception.errors:
         print(f"[ERROR] Reception {reception.index}: {error}")
@@ -46,31 +54,9 @@ def _report_reception(
     for file_type in reception.missing_types:
         print(f"[MISSING] {file_type} link not found")
 
-    if reception.timestamp is None:
-        return 0, 0, 0
-
-    reception_dir = build_reception_directory(reception.timestamp, output_dir)
-    print(f"[INFO] Creating directory: {reception_dir}")
-
-    totals = [0, 0, 0]
-
-    def announce(file_type: str, filename: str) -> None:
-        print(f"\n[DOWNLOAD] {file_type} -> {filename}")
-
-    def report_result(file_type: str, result: DownloadResult) -> None:
-        added_downloaded, added_failed, added_skipped = _print_result(file_type, result)
-        totals[0] += added_downloaded
-        totals[1] += added_failed
-        totals[2] += added_skipped
-
-    download_reception_files(
-        reception,
-        output_dir,
-        overwrite=overwrite,
-        on_download=announce,
-        on_result=report_result,
-    )
-    return totals[0], totals[1], totals[2]
+    if reception.timestamp is not None:
+        reception_dir = build_reception_directory(reception.timestamp, output_dir)
+        print(f"[INFO] Reception directory: {reception_dir}")
 
 
 def run(
@@ -95,10 +81,25 @@ def run(
 
     receptions = parse_receptions(document, base_url=target_url)
     print(f"[INFO] Found {len(receptions)} reception sections.")
-    print("[INFO] Downloading linked files; existing files will be skipped.")
-    downloaded = failed = skipped = 0
     for reception in receptions:
-        counts = _report_reception(reception, output_dir, overwrite)
+        _report_reception(reception, output_dir)
+
+    file_count = sum(
+        len(reception.links) for reception in receptions if reception.timestamp is not None
+    )
+    print(
+        f"\n[INFO] Downloading {file_count} files with "
+        f"up to {MAX_DOWNLOAD_WORKERS} threads; existing files will be skipped."
+    )
+    results = download_receptions_files(
+        receptions,
+        output_dir,
+        overwrite=overwrite,
+        max_workers=MAX_DOWNLOAD_WORKERS,
+    )
+    downloaded = failed = skipped = 0
+    for completed, (reception, file_type, result) in enumerate(results, start=1):
+        counts = _print_result(reception, file_type, result, completed, len(results))
         downloaded += counts[0]
         failed += counts[1]
         skipped += counts[2]

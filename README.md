@@ -35,4 +35,6 @@ Existing files are left untouched by default. Set `OVERWRITE = True` in
 
 Downloads are streamed, retried after temporary network failures, and skipped
 when the destination already exists unless `OVERWRITE = True`. If interrupted,
-run the command again to skip completed files and continue.
+up to eight active downloads are stopped and completed files are kept; run the
+command again to skip completed files and continue. Set `MAX_DOWNLOAD_WORKERS`
+in `config.py` to change the thread count.
