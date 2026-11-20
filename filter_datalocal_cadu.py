@@ -119,11 +119,14 @@ def main() -> None:
     backups: list[tuple[Path, Path]] = []
 
     try:
-        # Keep the union of folder paths, including folders with no .cadu files.
+        # Keep the folder structure, but omit empty MSU-MR image folders.
         for _, content_root in sources:
             for source_dir in content_root.rglob("*"):
                 if source_dir.is_dir():
-                    (staging_dir / source_dir.relative_to(content_root)).mkdir(parents=True, exist_ok=True)
+                    relative_dir = source_dir.relative_to(content_root)
+                    if any(part.casefold() == "msu-mr" for part in relative_dir.parts):
+                        continue
+                    (staging_dir / relative_dir).mkdir(parents=True, exist_ok=True)
 
         for relative_path, source_file in cadu_files.items():
             destination = staging_dir / relative_path
